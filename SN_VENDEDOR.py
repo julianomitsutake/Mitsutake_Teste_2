@@ -1,19 +1,4 @@
-# https://juliano-mitsutake.streamlit.app/
-# https://share.streamlit.io/?utm_source=streamlit&utm_medium=referral&utm_campaign=main&utm_content=-ss-streamlit-io-topright
-# https://github.com/julianomitsutake/Mitsutake_Teste/blob/main/main.py
 
-
-# streamlit run C:\Users\jm800945\Desktop\Python-20-06-2025\SN_VENDEDOR.py
-# https://juliano-mitsutake.streamlit.app/
-
-
-# Mitsutake_Teste_2
-
-
-# -*- coding: utf-8 -*-
-# SN_VENDEDOR.py
-# App Streamlit para registro e consulta de sugestões de vendedor
-# Banco: Microsoft Access (.accdb)
 
 import os
 import io
@@ -618,3 +603,4 @@ else:
     except pyodbc.Error as ex:
         st.error("Erro ao consultar o banco Access.")
         st.exception(ex)
+

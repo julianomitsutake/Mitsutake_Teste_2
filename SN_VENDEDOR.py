@@ -46,7 +46,7 @@ section[data-testid="stSidebar"] { position: relative; }
 # 2) st.secrets (local/Cloud)
 # 3) Defaults locais (apenas base_url) — token segue obrigatório
 _api_conf = st.secrets.get("api", {})
-API_BASE = (os.getenv("API_BASE") or _api_conf.get("base_url") or "http://127.0.0.1:8000").rstrip("/")
+API_BASE = (os.getenv("API_BASE") or _api_conf.get("base_url") or "http://192.168.0.50:5000").rstrip("/")
 API_TOKEN = os.getenv("API_TOKEN") or _api_conf.get("token") or ""
 API_TIMEOUT = int(os.getenv("API_TIMEOUT") or _api_conf.get("timeout", 10))
 
@@ -56,7 +56,7 @@ def _require_api_config():
             "⚠️ Configuração da API ausente.\n\n"
             "Defina via **variáveis de ambiente** (API_BASE, API_TOKEN, API_TIMEOUT)\n"
             "ou em **Settings → Segredos** com o bloco:\n\n"
-            "```toml\n[api]\nbase_url = \"http://127.0.0.1:8000\"\ntoken = \"SEU_TOKEN\"\ntimeout = 10\n```"
+            "```toml\n[api]\nbase_url = \"http://192.168.0.50:5000\"\ntoken = \"SEU_TOKEN\"\ntimeout = 10\n```"
         )
         st.stop()
 
@@ -610,3 +610,4 @@ else:
     except Exception as ex:
         st.error("Erro ao consultar (API).")
         st.exception(ex)
+

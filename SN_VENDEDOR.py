@@ -1,5 +1,4 @@
 
-
 # -*- coding: utf-8 -*-
 import os
 import io
@@ -9,6 +8,8 @@ from typing import Optional, Tuple, List
 import pandas as pd
 import requests
 import streamlit as st
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # =========================================================
 # CONFIGURAÇÕES DO APLICATIVO
@@ -49,14 +50,19 @@ _api_conf = st.secrets.get("api", {})
 API_BASE = (os.getenv("API_BASE") or _api_conf.get("base_url") or "http://192.168.0.50:5000").rstrip("/")
 API_TOKEN = os.getenv("API_TOKEN") or _api_conf.get("token") or ""
 API_TIMEOUT = int(os.getenv("API_TIMEOUT") or _api_conf.get("timeout", 10))
+# Verificação de SSL (1/true = ON, 0/false = OFF). Útil se usar túnel/mitm/self-signed em DEV.
+API_VERIFY_SSL = (os.getenv("API_VERIFY_SSL") or str(_api_conf.get("verify_ssl", "1"))).strip().lower() not in ("0", "false")
 
 def _require_api_config():
     if not API_BASE or not API_TOKEN:
         st.error(
             "⚠️ Configuração da API ausente.\n\n"
-            "Defina via **variáveis de ambiente** (API_BASE, API_TOKEN, API_TIMEOUT)\n"
+            "Defina via **variáveis de ambiente** (API_BASE, API_TOKEN, API_TIMEOUT, API_VERIFY_SSL)\n"
             "ou em **Settings → Segredos** com o bloco:\n\n"
-            "```toml\n[api]\nbase_url = \"http://192.168.0.50:5000\"\ntoken = \"SEU_TOKEN\"\ntimeout = 10\n```"
+            "```toml\n[api]\nbase_url = \"http://192.168.0.50:5000\"\n"
+            "token = \"SEU_TOKEN\"\n"
+            "timeout = 10\n"
+            "verify_ssl = 1\n```"
         )
         st.stop()
 
@@ -71,20 +77,37 @@ def _rerun():
             st.experimental_rerun()
 
 # =========================================================
-# CLIENTE HTTP (API)
+# CLIENTE HTTP (API) — sessão com retries
 # =========================================================
+def _requests_session_with_retries(total=3, backoff=0.5, status_forcelist=(502, 503, 504)):
+    sess = requests.Session()
+    retries = Retry(
+        total=total,
+        backoff_factor=backoff,
+        status_forcelist=status_forcelist,
+        allowed_methods=frozenset(["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
+    )
+    adapter = HTTPAdapter(max_retries=retries)
+    sess.mount("http://", adapter)
+    sess.mount("https://", adapter)
+    return sess
+
+_session = _requests_session_with_retries()
+
 def call_api(method: str, path: str, **kwargs):
     """Chama a API com cabeçalho X-API-Key e trata erros comuns."""
-    url = f"{API_BASE}{path}"
+    url = f"{API_BASE.rstrip('/')}/{path.lstrip('/')}"
     headers = kwargs.pop("headers", {}) or {}
     headers["X-API-Key"] = API_TOKEN
+    timeout = kwargs.pop("timeout", API_TIMEOUT)
 
     try:
-        r = requests.request(
-            method=method,
+        r = _session.request(
+            method=method.upper(),
             url=url,
             headers=headers,
-            timeout=API_TIMEOUT,
+            timeout=timeout,
+            verify=API_VERIFY_SSL,
             **kwargs
         )
         r.raise_for_status()
@@ -92,7 +115,31 @@ def call_api(method: str, path: str, **kwargs):
         if r.content and "application/json" in (r.headers.get("Content-Type") or ""):
             return r.json()
         return None
-    except requests.HTTPError as ex:
+
+    except requests.exceptions.SSLError as ex:
+        raise RuntimeError(
+            f"Falha ao chamar API {path}: erro TLS/SSL. "
+            f"Se estiver testando com certificado self-signed, defina verify_ssl=0 em [api] ou API_VERIFY_SSL=0."
+        ) from ex
+
+    except requests.exceptions.ConnectTimeout as ex:
+        raise RuntimeError(
+            f"Falha ao chamar API {path}: timeout de conexão. Verifique rede/DNS, host e porta."
+        ) from ex
+
+    except requests.exceptions.ReadTimeout as ex:
+        raise RuntimeError(
+            f"Falha ao chamar API {path}: timeout de leitura. O endpoint pode estar lento."
+        ) from ex
+
+    except requests.exceptions.ConnectionError as ex:
+        # inclui 'Connection refused' / host inalcançável
+        raise RuntimeError(
+            f"Falha ao chamar API {path}: conexão recusada ou host inacessível ({ex}). "
+            f"Confirme se {API_BASE} está correto e o serviço está ouvindo na porta."
+        ) from ex
+
+    except requests.exceptions.HTTPError as ex:
         resp = ex.response
         status = resp.status_code if resp is not None else "?"
         body = ""
@@ -104,8 +151,6 @@ def call_api(method: str, path: str, **kwargs):
         if status == 401:
             raise RuntimeError("Não autorizado (401). Verifique o token em Settings → Segredos.") from ex
         raise RuntimeError(f"Falha HTTP {status} em {path}: {body}") from ex
-    except requests.RequestException as ex:
-        raise RuntimeError(f"Falha ao chamar API {path}: {ex}") from ex
 
 @st.cache_data(ttl=15)
 def api_status() -> bool:
@@ -173,7 +218,7 @@ def carregar_sugestoes() -> pd.DataFrame:
 
     # Data/Hora pt-BR completa
     if "Data Lançamento" in df.columns:
-        data_dt = pd.to_datetime(df["Data Lançamento"], errors="coerce", dayfirst=True, infer_datetime_format=True)
+        data_dt = pd.to_datetime(df["Data Lançamento"], errors="coerce", dayfirst=True)
         df["Data Lançamento"] = data_dt.dt.strftime("%d/%m/%Y %H:%M:%S").fillna("")
 
     # Código sem separadores
@@ -312,12 +357,24 @@ if not st.session_state.get("authenticated", False):
     ok = api_status()
     st.caption(f"Status da API: {'🟢 Online' if ok else '🔴 Offline'}")
     if not ok:
-        st.warning("A API local parece offline. Verifique o serviço do Uvicorn.")
+        st.warning("A API parece offline. Verifique o serviço do backend (host/porta, firewall, bind 0.0.0.0).")
+
+    # Painel de diagnóstico rápido
+    with st.expander("🔧 Diagnóstico de Conectividade"):
+        st.write(f"API alvo: {API_BASE}")
+        st.write(f"Timeout (s): {API_TIMEOUT}")
+        st.write(f"Verificação SSL: {'ON' if API_VERIFY_SSL else 'OFF'}")
+        try:
+            raw = call_api("GET", "/health")
+            st.success(f"/health OK: {raw}")
+        except Exception as ex:
+            st.error("Falha ao consultar /health.")
+            st.code(str(ex))
 
     with st.form("form_login", clear_on_submit=False):
         st.text_input("Usuário", key="login_user")
         st.text_input("Senha", type="password", key="login_pass")
-        entrar = st.form_submit_button("Entrar")
+        entrar = st.form_submit_button("Entrar", disabled=not ok)
 
     if entrar:
         user = (st.session_state.login_user or "").strip()
@@ -397,11 +454,10 @@ if pagina == "SUGESTÃO DO VENDEDOR":
                 label = f"{cod} - {desc}" if desc else f"{cod}"
                 opcoes_itens.append(label)
 
-            idx_default = None if not opcoes_itens else None
             st.selectbox(
                 "Código Item / Descrição do Item *",
                 options=opcoes_itens if opcoes_itens else [],
-                index=idx_default,
+                index=None,
                 placeholder="Selecione o item correspondente à referência",
                 key="item_escolhido"
             )
@@ -610,4 +666,3 @@ else:
     except Exception as ex:
         st.error("Erro ao consultar (API).")
         st.exception(ex)
-
